@@ -1,0 +1,655 @@
+// package main
+
+// import (
+// 	"context"
+// 	"encoding/json"
+// 	"fmt"
+// 	"log"
+// 	"net/http"
+// 	"regexp"
+// 	"strings"
+// 	"sync"
+// 	"time"
+
+// 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+// 	"github.com/tmc/langchaingo/embeddings"
+// 	"github.com/tmc/langchaingo/llms"
+// 	"github.com/tmc/langchaingo/llms/ollama"
+// 	"github.com/tmc/langchaingo/llms/openai"
+// 	"github.com/tmc/langchaingo/schema"
+// 	"github.com/tmc/langchaingo/vectorstores"
+// 	"github.com/tmc/langchaingo/vectorstores/pgvector"
+// )
+		
+
+// type QueryResponse struct {
+// 	Answer string `json:"answer"`
+// 	Graph  struct {
+// 		Nodes []map[string]string `json:"nodes"`
+// 		Links []map[string]string `json:"links"`
+// 	} `json:"graph"`
+// }
+
+
+// type vectorResult struct{
+// 	docs []schema.Document
+// 	err error
+// 	context string
+// }
+
+// type kgResult struct{
+// 	nodes   []map[string]string
+// 	links   []map[string]string
+// 	context string
+// 	err     error
+// }
+
+// type AddRequest struct {
+// 	Documents []struct {
+// 		Text string `json:"text"`
+// 	} `json:"documents"`
+// }
+
+// type QueryRequest struct {
+// 	Content string `json:"content"`
+// }
+
+// type QueryHistory struct {
+// 	Content  string `json:"content"`
+// 	Response string `json:"response"`
+// 	err    error
+// }
+
+// func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+//     return func(w http.ResponseWriter, r *http.Request) {
+//         // 设置 CORS 头
+//         w.Header().Set("Access-Control-Allow-Origin", "*") // 允许所有源（可改为特定域名）
+//         w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+//         w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+//         w.Header().Set("Access-Control-Max-Age", "86400") // 缓存预检请求 24 小时
+
+//         // 处理 OPTIONS 预检请求
+//         if r.Method == http.MethodOptions {
+//             w.WriteHeader(http.StatusNoContent)
+//             return
+//         }
+
+//         // 继续处理请求
+//         next(w, r)
+//     }
+// }
+
+
+// func main() {
+// 	// 初始化 Ollama 嵌入器
+// 	ollamaEmbedder, err := ollama.New(
+// 		ollama.WithModel("nomic-embed-text"),
+// 	)
+// 	if err != nil {
+// 		log.Fatalf("初始化 Ollama 嵌入器失败: %v", err)
+// 	}
+// 	embedder, err := embeddings.NewEmbedder(ollamaEmbedder)
+// 	if err != nil {
+// 		log.Fatalf("创建嵌入器失败: %v", err)
+// 	}
+
+// 	// 初始化向量存储（PostgreSQL）
+// 	store, err := pgvector.New(
+// 		context.Background(),
+// 		pgvector.WithConnectionURL("postgres://postgres:yourpassword@localhost:5432/postgres"),
+// 		pgvector.WithEmbedder(embedder),
+// 	)
+// 	if err != nil {
+// 		log.Fatalf("初始化向量存储失败: %v", err)
+// 	}
+// 	// 初始化 Neo4j 驱动
+// 	neo4jDriver, err := neo4j.NewDriverWithContext(
+// 		"bolt://localhost:7687",
+// 		neo4j.BasicAuth("neo4j", "fzq020320", ""),
+// 	)
+// 	if err != nil {
+// 		log.Fatalf("初始化 Neo4j 驱动失败: %v", err)
+// 	}
+	
+// 	// clearNeo4jDatabase(neo4jDriver)
+// 	defer neo4jDriver.Close(context.Background())
+
+// 	// 设置 HTTP 路由
+// 	http.HandleFunc("/add/", corsMiddleware(addDocumentsHandler(store,neo4jDriver)))
+// 	http.HandleFunc("/query/", corsMiddleware(queryHandler(store, neo4jDriver)))
+// 	http.HandleFunc("/history/", corsMiddleware(historyHandler(neo4jDriver)))
+
+// 	// http.HandleFunc("/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+//     //     w.Header().Set("Content-Type", "text/html; charset=utf-8")
+//     //     http.ServeFile(w, r, "frontend/index.html")
+//     // }))
+// 	// 启动服务器
+// 	log.Println("服务器启动于 :9020")
+// 	log.Fatal(http.ListenAndServe(":9020", nil))
+// }
+
+// func addDocumentsHandler(store vectorstores.VectorStore,neo4jDriver neo4j.DriverWithContext) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		log.Println("Starting to add documents...")
+		
+// 		if r.Method != http.MethodPost {
+// 			http.Error(w, "仅支持POST请求", http.StatusMethodNotAllowed)
+// 			return
+// 		}
+
+// 		var req AddRequest
+// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+// 			log.Printf("解析请求体失败: %v", err)
+// 			http.Error(w, "无效的请求体", http.StatusBadRequest)
+// 			return
+// 		}
+
+// 		docs := make([]schema.Document, len(req.Documents))
+// 		for i, doc := range req.Documents {
+// 			docs[i] = schema.Document{
+// 				PageContent: doc.Text,
+// 				Metadata:    map[string]interface{}{},
+// 			}
+// 		}
+
+// 		_, err := store.AddDocuments(context.Background(), docs)
+// 		if err != nil {
+// 			log.Printf("存储文档失败: %v", err)
+// 			http.Error(w, "存储文档失败", http.StatusInternalServerError)
+// 			return
+// 		}
+// 		// 2. 将文档存储到 Neo4j
+// 		// 初始化 OpenAI 客户端
+//         llm, err := openai.New(
+// 			openai.WithBaseURL("https://yunwu.ai/v1"),
+//             openai.WithToken("sk-YYitVcwb77QXxispAc33E9Eb1e414189B0718c1dAcD0D9F5"),
+//             openai.WithModel("gpt-4"),
+//         )
+//         if err != nil {
+//             log.Printf("初始化 OpenAI 客户端失败: %v", err)
+//             http.Error(w, "初始化 AI 模型失败", http.StatusInternalServerError)
+//             return
+//         }
+
+//         // 使用 OpenAI 提取实体和关系
+//         prompt := "从以下文本中提取实体和它们之间的关系，格式为：实体1|实体2|关系\n" + "如果没有关系，返回空字符串\n" + "文本：" + req.Documents[0].Text
+
+//         // 使用 langchaingo 的 Call 方法
+//         response, err := llm.Call(context.Background(), prompt, llms.WithTemperature(0.7))
+//         if err != nil {
+//             log.Printf("OpenAI 调用失败: %v", err)
+//             http.Error(w, "提取实体关系失败", http.StatusInternalServerError)
+//             return
+//         }
+
+//         // 解析 OpenAI 返回的结果
+//         if response == "" {
+//             log.Printf("文档中未找到实体关系: %s", req.Documents)
+//             w.WriteHeader(http.StatusOK)
+//             w.Write([]byte("文档中未找到实体关系"))
+//             return
+//         }
+
+//         // 存储到 Neo4j
+//         entitiesAndRelations := strings.Split(response, "\n")
+//         for _, line := range entitiesAndRelations {
+//             line = strings.TrimSpace(line)
+//             if line == "" {
+//                 continue
+//             }
+//             parts := strings.Split(line, "|")
+//             if len(parts) != 3 {
+//                 log.Printf("无效的关系格式: %s", line)
+//                 continue
+//             }
+//             entity1, entity2, relation := parts[0], parts[1], parts[2]
+//             err := storeToNeo4j(neo4jDriver, entity1, entity2, relation)
+//             if err != nil {
+//                 log.Printf("存储到 Neo4j 失败: %v", err)
+//                 http.Error(w, "存储到 Neo4j 失败", http.StatusInternalServerError)
+//                 return
+//             }
+//         }
+
+// 		if err != nil {
+// 			log.Printf("存储文档失败: %v", err)
+// 			http.Error(w, "存储文档失败", http.StatusInternalServerError)
+// 			return
+// 		}
+
+// 		fmt.Fprintln(w, "文档添加成功")
+// 	}
+// }
+
+
+// func queryHandler(store vectorstores.VectorStore, neo4jDriver neo4j.DriverWithContext) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		if r.Method != http.MethodPost {
+// 			http.Error(w, "仅支持POST请求", http.StatusMethodNotAllowed)
+// 			return
+// 		}
+
+// 		var req QueryRequest
+// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+// 			log.Printf("解析请求体失败: %v", err)
+// 			http.Error(w, "无效的请求体", http.StatusBadRequest)
+// 			return
+// 		}
+// 		if req.Content == "" {
+//             http.Error(w, "content 字段不能为空", http.StatusBadRequest)
+//             return
+//         }
+// 		queryCache := sync.Map{}
+		
+// 		if cached,ok:=queryCache.Load(req.Content);ok{
+// 			resp := cached
+// 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+// 			if err := json.NewEncoder(w).Encode(resp); err != nil {
+// 				log.Printf("JSON 编码失败: %v", err)
+// 				http.Error(w, "响应编码失败", http.StatusInternalServerError)
+// 				return
+// 			}
+// 			return
+// 		}
+// 		vectorChan := make(chan vectorResult, 1)
+// 		kgChan := make(chan kgResult, 1)
+// 		// historyChan := make(chan QueryHistory,1)
+
+
+		
+
+// 		// 查询历史记录
+// 		// go func() {
+// 		// 	session := neo4jDriver.NewSession(context.Background(),neo4j.SessionConfig{DatabaseName: "neo4j"})
+// 		// 	defer session.Close(context.Background())
+
+// 		// 	result, err := session.Run(context.Background(),
+// 		// 		"MATCH (h:QueryHistory {content: $content}) RETURN h.response, h.docContext LIMIT 1",
+// 		// 		map[string]interface{}{"content": req.Content},
+//         // 	)
+// 		// 	if err != nil {
+// 		// 		log.Printf("无相同历史问答: %v", err)
+// 		// 		http.Error(w, "无相同历史问答", http.StatusInternalServerError)
+// 		// 		historyChan <- QueryHistory{
+// 		// 			err:err,
+// 		// 		}
+// 		// 		return
+// 		// 	}
+// 		// 	var history QueryHistory
+
+// 		// 	record := result.Record()
+// 		// 	content, _ := record.Get("h.content")
+// 		// 	response, _ := record.Get("h.response")
+
+// 		// 	history = QueryHistory{
+// 		// 		Content:  content.(string),
+// 		// 		Response: response.(string),
+// 		// 	}
+		
+// 		// 	historyChan <- history
+// 		// }()
+
+
+// 		// 1. 从 pgvector 搜索相关文档
+// 		go func(){
+// 			docs, err := store.SimilaritySearch(context.Background(), req.Content, 3)
+// 			if err != nil {
+// 				vectorChan <- vectorResult{
+// 					err:err,
+// 				}
+// 				return
+// 			}
+// 			docContext := "相关文档：\n"
+// 			for _,doc := range docs{
+// 				docContext +=fmt.Sprint("- %s\n",doc.PageContent)
+// 			}
+// 			vectorChan <- vectorResult{
+// 				docs: docs,
+// 				err:nil,
+// 				context:docContext,
+// 			}
+// 		}()
+		
+// 		 // Neo4j 查询（返回图谱数据）
+// 		go func() {
+// 			session := neo4jDriver.NewSession(context.Background(),neo4j.SessionConfig{})
+// 			defer session.Close(context.Background())
+// 			result, err := session.Run(
+// 				context.Background(),
+// 				"MATCH (e:Entity {name: $name})-[r]->(n) "+
+// 					"RETURN e.name AS source, r.original_name AS rel, n.name AS target, n.description AS desc",
+// 				map[string]interface{}{"name": req.Content},
+// 			)
+// 			if err != nil {
+// 				kgChan <- kgResult{err: err}
+// 				return
+// 			}
+		
+// 			nodes := make([]map[string]string, 0)
+// 			links := make([]map[string]string, 0)
+// 			nodeSet := make(map[string]bool)
+// 			kgContext := "知识图谱信息：\n"
+		
+// 			for result.Next(context.Background()) {
+// 				record := result.Record()
+// 				source, _ := record.Get("source")
+// 				relType, _ := record.Get("rel")
+// 				target, _ := record.Get("target")
+// 				desc, _ := record.Get("desc")
+// 				if desc == nil {
+// 					desc = "无描述"
+// 				}
+// 				if relType == nil {
+// 					relType = "未知关系"
+// 				}
+		
+// 				// 添加节点
+// 				sourceNode := map[string]string{"id": source.(string), "label": source.(string)}
+// 				targetNode := map[string]string{"id": target.(string), "label": target.(string), "description": desc.(string)}
+// 				if !nodeSet[source.(string)] {
+// 					nodes = append(nodes, sourceNode)
+// 					nodeSet[source.(string)] = true
+// 				}
+// 				if !nodeSet[target.(string)] {
+// 					nodes = append(nodes, targetNode)
+// 					nodeSet[target.(string)] = true
+// 				}
+		
+// 				// 添加关系
+// 				links = append(links, map[string]string{
+// 					"source": source.(string),
+// 					"target": target.(string),
+// 					"label":  relType.(string), // 使用原始关系名
+// 				})
+		
+// 				// 构建上下文
+// 				kgContext += fmt.Sprintf("- %s %s %s (%s)\n", source, relType, target, desc)
+// 			}
+// 			if err := result.Err(); err != nil {
+// 				kgChan <- kgResult{err: err}
+// 				return
+// 			}
+// 			kgChan <- kgResult{nodes: nodes, links: links, context: kgContext, err: nil}
+// 		}()
+//         // 收集结果
+		
+//         var  docContext, kgContext string
+//         var nodes []map[string]string
+//         var links []map[string]string
+// 		// var flag bool
+// 		// flag = false
+
+// 		// for{
+// 		// 	select {
+// 		// 	case fr:=<-historyChan:
+// 		// 		if fr.err!=nil{
+// 		// 			log.Printf("无相同历史问答: %v", fr.err)
+// 		// 		}else if fr.Response != ""{
+// 		// 			flag = true
+// 		// 			fastresult = fr.Response
+// 		// 			resp := QueryResponse{
+// 		// 				Answer : fastresult,
+// 		// 			}
+// 		// 			resp.Graph.Nodes = nodes
+// 		// 			resp.Graph.Links = links
+// 		// 			SaveQueryHistory(neo4jDriver,req.Content, fastresult)
+// 		// 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+// 		// 			if err := json.NewEncoder(w).Encode(resp); err != nil {
+// 		// 				log.Printf("JSON 编码失败: %v", err)
+// 		// 				http.Error(w, "响应编码失败", http.StatusInternalServerError)
+// 		// 				return
+// 		// 			}
+// 		// 			return
+// 		// 		}
+				
+// 				for i := 0; i < 2; i++ {
+// 					select {
+// 					case vr := <-vectorChan:
+// 						if vr.err != nil {
+// 							log.Printf("向量搜索失败: %v", vr.err)
+// 							http.Error(w, "搜索失败", http.StatusInternalServerError)
+// 						}else{
+// 							// flag = true
+// 							docContext = vr.context
+// 						}
+	
+// 					case kr := <-kgChan:
+// 						if kr.err != nil {
+// 							log.Printf("Neo4j 查询失败: %v", kr.err)
+// 							kgContext = "无法获取知识图谱信息\n"
+// 						} else {
+// 							// flag = true
+// 							kgContext = kr.context
+// 							nodes = kr.nodes
+// 							links = kr.links
+// 						}
+					
+// 				}
+// 				}
+				
+// 				// if !flag{
+// 				// 	fastresult = "无相关文档和知识图谱信息，无法提供回答。"
+// 				// 	resp := QueryResponse{
+// 				// 		Answer : fastresult,
+// 				// 	}
+// 				// 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+// 				// 	if err := json.NewEncoder(w).Encode(resp); err != nil {
+// 				// 		log.Printf("JSON 编码失败: %v", err)
+// 				// 		http.Error(w, "响应编码失败", http.StatusInternalServerError)
+// 				// 		return
+// 				// 	}
+// 				// }
+// 			// 4. 构造 ChatGPT 提示
+// 				prompt := fmt.Sprintf(
+// 					"你是一个专业的 AWS 技术助手，根据以下文档和知识图谱提供简洁、准确的回答。若文档中无内容，则向用户致歉，无法回答相关内容。\n\n%s\n%s\n问题：%s\n回答：",
+// 					docContext, kgContext, req.Content)
+
+// 				// 5. 初始化 OpenAI 客户端
+// 				llm, err := openai.New(
+// 					openai.WithBaseURL("https://yunwu.ai/v1"),
+// 					openai.WithToken("sk-YYitVcwb77QXxispAc33E9Eb1e414189B0718c1dAcD0D9F5"),
+// 					openai.WithModel("gpt-4"),
+// 				)
+// 				if err != nil {
+// 					log.Printf("初始化 OpenAI 客户端失败: %v", err)
+// 					http.Error(w, "初始化 AI 模型失败", http.StatusInternalServerError)
+// 					return
+// 				}
+
+// 				// 6. 调用 ChatGPT API
+// 				response, err := llm.Call(context.Background(), prompt, llms.WithTemperature(0.7))
+// 				log.Println(prompt)
+// 				log.Println(response)
+// 				if err != nil {
+// 					log.Printf("ChatGPT 调用失败: %v", err)
+// 					http.Error(w, "生成响应失败", http.StatusInternalServerError)
+// 					return
+// 				}
+
+// 				resp := QueryResponse{
+// 					Answer :response,
+// 				}
+// 				resp.Graph.Nodes = nodes
+// 				resp.Graph.Links = links
+
+// 				queryCache.Store(req.Content, resp)
+// 				SaveQueryHistory(neo4jDriver,req.Content, response)
+// 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+// 				if err := json.NewEncoder(w).Encode(resp); err != nil {
+// 					log.Printf("JSON 编码失败: %v", err)
+// 					http.Error(w, "响应编码失败", http.StatusInternalServerError)
+// 					return
+// 				}
+			
+// 		}
+// 			}
+
+// 	// }
+		
+// 	// }
+	
+
+
+// // 存储实体和关系到 Neo4j
+
+// func storeToNeo4j(neo4jDriver neo4j.DriverWithContext, entity1, entity2, relation string) error {
+//     session := neo4jDriver.NewSession(context.Background(),neo4j.SessionConfig{})
+//     defer session.Close(context.Background())
+
+//     // 创建或更新实体1
+//     _, err := session.Run(
+// 		context.Background(),
+//         "MERGE (e:Entity {name: $name}) SET e.description = $desc",
+//         map[string]interface{}{
+//             "name": entity1,
+//             "desc": "无描述",
+//         },
+//     )
+//     if err != nil {
+//         return err
+//     }
+
+//     // 创建或更新实体2
+//     _, err = session.Run(
+// 		context.Background(),
+//         "MERGE (e:Entity {name: $name}) SET e.description = $desc",
+//         map[string]interface{}{
+//             "name": entity2,
+//             "desc": "无描述",
+//         },
+//     )
+//     if err != nil {
+//         return err
+//     }
+
+//     // 规范化关系名
+//     // normalizedRelation := normalizeRelationName(relation)
+
+//     // 创建关系，并将原始关系名存储为属性
+//     _, err = session.Run(
+// 		context.Background(),
+//         "MATCH (e1:Entity {name: $name1}), (e2:Entity {name: $name2}) "+
+//             "MERGE (e1)-[r:RELATION {original_name: $original_name}]->(e2)",
+//         map[string]interface{}{
+//             "name1":         entity1,
+//             "name2":         entity2,
+//             "original_name": relation, // 存储原始关系名（如 "侄孙女-外祖母"）
+//         },
+//     )
+//     if err != nil {
+//         return err
+//     }
+
+//     return nil
+// }
+
+// // 规范化关系名
+// func normalizeRelationName(relation string) string {
+//     // 将中文和特殊字符替换为下划线，保留字母和数字
+//     // 这里简单地将所有非字母数字字符替换为下划线
+//     reg, err := regexp.Compile("[^a-zA-Z0-9]")
+//     if err != nil {
+//         log.Printf("正则表达式编译失败: %v", err)
+//         return "RELATION" // 回退到默认值
+//     }
+//     normalized := reg.ReplaceAllString(relation, "_")
+//     // 转换为大写
+//     normalized = strings.ToUpper(normalized)
+//     // 如果结果为空或无效，使用默认关系名
+//     if normalized == "" {
+//         normalized = "RELATION"
+//     }
+//     return normalized
+// }
+// func clearNeo4jDatabase(neo4jDriver neo4j.DriverWithContext) error {
+//     session := neo4jDriver.NewSession(context.Background(),neo4j.SessionConfig{})
+//     defer session.Close(context.Background())
+
+//     // 运行清空查询
+//     _, err := session.Run(
+// 		context.Background(),
+//         "MATCH (n) DETACH DELETE n",
+//         nil,
+//     )
+//     if err != nil {
+//         log.Printf("清空 Neo4j 数据库失败: %v", err)
+//         return err
+//     }
+
+//     log.Println("Neo4j 数据库已清空")
+//     return nil
+// }
+
+// // SaveQueryHistory 保存查询历史到 Neo4j
+// func SaveQueryHistory(driver neo4j.DriverWithContext, content, response string) error {
+//     session := driver.NewSession(context.Background(),neo4j.SessionConfig{DatabaseName: "neo4j"})
+//     defer session.Close(context.Background())
+
+//     _, err := session.Run(context.Background(),
+//         "CREATE (h:QueryHistory {content: $content, response: $response, timestamp: $timestamp})",
+//         map[string]interface{}{
+//             "content":  content,
+//             "response": response,
+//             "timestamp": time.Now().Unix(),
+//         },
+//     )
+//     if err != nil {
+//         log.Printf("保存查询历史失败: %v", err)
+//         return err
+//     }
+
+//     log.Println("查询历史保存成功")
+//     return nil
+// }
+
+// // historyHandler 处理 /history/ 请求，返回查询历史
+// func historyHandler(driver neo4j.DriverWithContext) http.HandlerFunc {
+//     return func(w http.ResponseWriter, r *http.Request) {
+//         if r.Method != http.MethodGet {
+//             http.Error(w, "仅支持 GET 请求", http.StatusMethodNotAllowed)
+//             return
+//         }
+		
+//         session := driver.NewSession(context.Background(),neo4j.SessionConfig{DatabaseName: "neo4j"})
+//         defer session.Close(context.Background())
+
+//         result, err := session.Run(context.Background(),
+//             "MATCH (h:QueryHistory) RETURN h.content, h.response ORDER BY h.timestamp DESC",
+//             nil,
+//         )
+//         if err != nil {
+//             log.Printf("查询历史失败: %v", err)
+//             http.Error(w, "获取历史失败", http.StatusInternalServerError)
+//             return
+//         }
+
+//         var history []QueryHistory
+//         for result.Next(context.Background()) {
+//             record := result.Record()
+//             content, _ := record.Get("h.content")
+//             response, _ := record.Get("h.response")
+
+//             history = append(history, QueryHistory{
+//                 Content:  content.(string),
+//                 Response: response.(string),
+//             })
+//         }
+
+//         if err := result.Err(); err != nil {
+//             log.Printf("读取历史记录失败: %v", err)
+//             http.Error(w, "获取历史失败", http.StatusInternalServerError)
+//             return
+//         }else{
+// 			// log.Printf("历史记录获取成功: %v", history)
+// 		}
+
+//         w.Header().Set("Content-Type", "application/json")
+//         if err := json.NewEncoder(w).Encode(history); err != nil {
+//             log.Printf("序列化历史记录失败: %v", err)
+//             http.Error(w, "获取历史失败", http.StatusInternalServerError)
+//             return
+//         }else{
+// 			log.Printf("Succeed")
+// 		}
+//     }
+// }

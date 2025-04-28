@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KG-RAG 服务器</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- D3.js -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        #graph { width: 100%; height: 400px; border: 1px solid #ccc; margin-top: 20px; }
+        .response { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .history { margin: 20px 0; padding: 15px; border: 1px solid #eee; border-radius: 5px; }
+        .loading { display: none; color: #666; }
+        .error { color: red; }
+    </style>
+</head>
+<body class="container">
+    <h1 class="my-4">KG-RAG 服务器</h1>
+
+    <!-- 添加文档 -->
+    <h2>添加文档</h2>
+    <form id="add-form" class="mb-4">
+        <textarea name="text" rows="5" class="form-control" placeholder="输入文档内容..."></textarea>
+        <button type="submit" class="btn btn-primary mt-2">添加</button>
+        <div id="add-status" class="mt-2"></div>
+    </form>
+
+    <!-- 查询 -->
+    <h2>查询</h2>
+    <form id="query-form" class="mb-4">
+        <div class="input-group">
+            <input type="text" name="content" class="form-control" placeholder="输入查询，例如：DynamoDB 是什么？">
+            <button type="submit" class="btn btn-primary">查询</button>
+        </div>
+        <div id="query-status" class="loading mt-2">加载中...</div>
+    </form>
+    
+    <!-- 清空按钮 -->
+    <h2>清空数据</h2>
+    <div class="mb-4">
+        <button id="clear-neo4j" class="btn btn-danger me-2">清空知识图谱</button>
+        <button id="clear-pgvector" class="btn btn-danger">清空向量数据库</button>
+        <div id="clear-status" class="mt-2"></div>
+    </div>
+
+    <!-- 知识图谱 -->
+    <h2>知识图谱</h2>
+    <div id="graph"></div>
+
+    <!-- 响应 -->
+    <h2>回复</h2>
+    <div id="response" class="response"></div>
+
+    <!-- 查询历史 -->
+    <h2>查询历史</h2>
+    <div id="history" class="history"></div>
+
+    <script>
+        // 动态设置 API 基础 URL，适应本地和公网
+        const API_BASE = "http://localhost:9020"
+
+        // 添加文档
+        document.getElementById('add-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const status = document.getElementById('add-status');
+            status.textContent = '添加中...';
+            status.className = 'loading';
+            try {
+                const text = e.target.text.value.trim();
+                const res = await fetch(`${API_BASE}/add`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ "documents": [{"text":text}] })
+                });
+                if (!res.ok) throw new Error('添加失败');
+                status.textContent = '文档添加成功！';
+                status.className = '';
+                e.target.reset();
+            } catch (err) {
+                status.textContent = `错误：${err.message}`;
+                status.className = 'error';
+            }
+        });
+
+        // 查询
+        document.getElementById('query-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const status = document.getElementById('query-status');
+            const responseDiv = document.getElementById('response');
+            status.style.display = 'block';
+            try {
+                const content = e.target.content.value;
+                const res = await fetch(`${API_BASE}/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ "content":content } )
+                });
+                if (!res.ok) throw new Error('查询失败');
+                // console.log("hihihihihi",res.text())
+                const data = await res.json();
+                responseDiv.textContent = data.answer;
+                status.style.display = 'none';
+                // 更新历史
+                updateHistory();
+                
+                // 动态图谱
+                graphData = data.graph
+                console.log(graphData)
+                renderGraph(graphData);
+            } catch (err) {
+                status.textContent = `错误：${err.message}`;
+                status.className = 'error';
+                status.style.display = 'block';
+            }
+        });
+
+        // 清空知识图谱
+        document.getElementById('clear-neo4j').addEventListener('click', async () => {
+            const status = document.getElementById('clear-status');
+            status.textContent = '清空知识图谱中...';
+            status.className = 'loading';
+            try {
+                const res = await fetch(`${API_BASE}/clear-neo4j`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (!res.ok) throw new Error('清空知识图谱失败');
+                status.textContent = '知识图谱已清空！';
+                status.className = '';
+                renderGraph({ nodes: [], links: [] }); // 清空图谱显示
+            } catch (err) {
+                status.textContent = `错误：${err.message}`;
+                status.className = 'error';
+            }
+        });
+
+        // 清空向量数据库
+        document.getElementById('clear-pgvector').addEventListener('click', async () => {
+            const status = document.getElementById('clear-status');
+            status.textContent = '清空向量数据库中...';
+            status.className = 'loading';
+            try {
+                const res = await fetch(`${API_BASE}/clear-pgvector`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (!res.ok) throw new Error('清空向量数据库失败');
+                status.textContent = '向量数据库已清空！';
+                status.className = '';
+            } catch (err) {
+                status.textContent = `错误：${err.message}`;
+                status.className = 'error';
+            }
+        });
+
+        // 渲染知识图谱
+        function renderGraph(graph) {
+            // 清空旧图谱
+            d3.select("#graph").selectAll("*").remove();
+
+            if (!graph || !graph.nodes || !graph.links) {
+                d3.select("#graph").append("p").text("无知识图谱数据");
+                return;
+            }
+
+            const width = 600;
+            const height = 400;
+
+            const svg = d3.select("#graph")
+                .append("svg")
+                .attr("width", width)
+                .attr("height", height);
+
+            // 力导向图模拟
+            const simulation = d3.forceSimulation(graph.nodes)
+                .force("link", d3.forceLink(graph.links).id(d => d.id).distance(100))
+                .force("charge", d3.forceManyBody().strength(-200))
+                .force("center", d3.forceCenter(width / 2, height / 2));
+
+            // 绘制连线
+            const link = svg.append("g")
+                .attr("class", "links")
+                .selectAll("line")
+                .data(graph.links)
+                .enter().append("line")
+                .attr("class", "link")
+                .attr("stroke-width", 2);
+
+            // 绘制连线标签
+            const linkText = svg.append("g")
+                .selectAll("text")
+                .data(graph.links)
+                .enter().append("text")
+                .attr("font-size", 10)
+                .attr("fill", "#555")
+                .text(d => d.label);
+
+            // 绘制节点
+            const node = svg.append("g")
+                .attr("class", "nodes")
+                .selectAll("g")
+                .data(graph.nodes)
+                .enter().append("g")
+                .attr("class", "node")
+                .call(d3.drag()
+                    .on("start", dragstarted)
+                    .on("drag", dragged)
+                    .on("end", dragended));
+
+            node.append("circle")
+                .attr("r", 10)
+                .attr("fill", "#69b3a2");
+
+            node.append("text")
+                .attr("dx", 12)
+                .attr("dy", ".35em")
+                .text(d => d.label);
+
+            // 鼠标悬停显示描述
+            node.append("title")
+                .text(d => d.description || "无描述");
+
+            // 模拟更新
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                linkText
+                    .attr("x", d => (d.source.x + d.target.x) / 2)
+                    .attr("y", d => (d.source.y + d.target.y) / 2);
+
+                node
+                    .attr("transform", d => `translate(${d.x},${d.y})`);
+            });
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+        }
+
+        // 更新查询历史
+        async function updateHistory() {
+            try {
+                const res = await fetch(`${API_BASE}/history`);
+                console.log('Response status:', res.status);
+                if (!res.ok) throw new Error('获取历史失败');
+                const data = await res.json();
+                console.log('History data:', data);
+                const historyDiv = document.getElementById('history');
+                historyDiv.innerHTML = data.map(h => `
+                    <p><b>查询：</b> ${h.content}<br><b>响应：</b> ${h.response}</p>
+                `).join('');
+            } catch (err) {
+                console.error('历史加载失败:', err);
+            }
+        }
+
+        // 页面加载时初始化历史
+        updateHistory();
+    </script>
+</body>
+</html>
